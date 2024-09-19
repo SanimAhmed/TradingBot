@@ -248,6 +248,7 @@ def prepare_data(data):
     except Exception as e:
         logger.error(f"Error preparing data: {e}")
         return None, None
+    
 def optimize_model(X, y):
     def objective(trial):
         try:
@@ -389,13 +390,14 @@ def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70), base_sentiment_t
     
     return rsi_thresholds, sentiment_thresholds
 
-def determine_trade_signal_enhanced(predicted_close, current_close, sentiment_score, latest_data, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1)):
+def determine_trade_signal_enhanced(predicted_close, current_close, sentiment_score, latest_data, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1), rsi_thresholds=None, sentiment_thresholds=None):
     """Enhanced trade signal decision combining price prediction, sentiment, and RSI with adjustable thresholds."""
     try:
         rsi = latest_data['rsi'].iloc[-1] if 'rsi' in latest_data.columns and not latest_data['rsi'].empty else None
         volatility = calculate_volatility(latest_data) if 'close' in latest_data.columns and not latest_data['close'].empty else 1.0
 
-        rsi_thresholds, sentiment_thresholds = adjust_thresholds(volatility, base_rsi_thresholds, base_sentiment_thresholds)
+        if rsi_thresholds is None or sentiment_thresholds is None:
+            rsi_thresholds, sentiment_thresholds = adjust_thresholds(volatility, base_rsi_thresholds, base_sentiment_thresholds)
 
         rsi_low, rsi_high = rsi_thresholds
         sentiment_positive, sentiment_negative = sentiment_thresholds
@@ -461,11 +463,11 @@ def sensitivity_analysis(data, model):
     for rsi_thresholds in rsi_thresholds_range:
         for sentiment_thresholds in sentiment_thresholds_range:
             trade_signals = []
-            for row in data.itertuples():
+            for idx, row in data.iterrows():
                 signal = determine_trade_signal_enhanced(
-                    row.predicted_close,
-                    row.current_close,
-                    row.sentiment_score,
+                    row['predicted_close'],
+                    row['current_close'],
+                    row['sentiment_score'],
                     data,
                     rsi_thresholds=rsi_thresholds,
                     sentiment_thresholds=sentiment_thresholds
@@ -474,11 +476,12 @@ def sensitivity_analysis(data, model):
 
             # Evaluate performance with current thresholds
             score = evaluate_strategy(trade_signals, data['actual_returns'])
-            if score > best_score:
-                best_score = score
+            if score['annualized_return'] > best_score:
+                best_score = score['annualized_return']
                 best_thresholds = (rsi_thresholds, sentiment_thresholds)
 
     return best_thresholds
+
 
 async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1)):
     try:
@@ -612,8 +615,8 @@ async def process_coin(symbol):
 
     try:
         try:
-            historical_data_1h =  fetch_historical_data(symbol, '1h', start_time, end_time)
-            historical_data_d =  fetch_historical_data(symbol, '1d', start_time, end_time)
+            historical_data_1h = fetch_historical_data(symbol, '1h', start_time, end_time)
+            historical_data_d = fetch_historical_data(symbol, '1d', start_time, end_time)
         except Exception as e:
             logger.error("Error fetching historical data for %s: %s", symbol, e)
             return
@@ -632,7 +635,8 @@ async def process_coin(symbol):
                 
                 logger.info("Performing real-time trading for %s...", symbol)
                 try:
-                    trade_signal, message = await real_time_trading(symbol, model, X_train, y_train)
+                    
+                    trade_signal, message = await real_time_trading(symbol, model, X_train, y_train, analyzer)
                     logger.info("Trade signal for %s: %d", symbol, trade_signal)
                 except Exception as e:
                     logger.error("Error during real-time trading for %s: %s", symbol, e)
