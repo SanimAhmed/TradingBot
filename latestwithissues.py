@@ -388,7 +388,6 @@ def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
     
     return rsi_thresholds, None
 
-
 def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70)):
     """Generate trade signals based on price prediction and RSI, without sentiment score."""
     try:
@@ -408,6 +407,7 @@ def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi
     except Exception as e:
         logger.error("Error determining trade signal: %s", e)
         return 0  # Hold as a default fallback
+
 
 def evaluate_strategy(trade_signals, actual_returns):
 
@@ -477,7 +477,8 @@ def sensitivity_analysis(data, model):
     return best_thresholds
 
 
-async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1)):
+
+async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70)):
     try:
         logger.info(f"Starting real-time trading for {symbol}")
 
@@ -486,8 +487,8 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
 
         # Fetch historical data
         try:
-            data_1h =  fetch_historical_data(symbol, Client.KLINE_INTERVAL_1HOUR, start_time, end_time)
-            data_d =  fetch_historical_data(symbol, Client.KLINE_INTERVAL_1DAY, start_time, end_time)
+            data_1h = fetch_historical_data(symbol, Client.KLINE_INTERVAL_1HOUR, start_time, end_time)
+            data_d = fetch_historical_data(symbol, Client.KLINE_INTERVAL_1DAY, start_time, end_time)
         except Exception as e:
             logger.error(f"Error fetching historical data: {e}")
             return 0, "Error fetching historical data."
@@ -503,11 +504,12 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                 return 0, "Error adding indicators."
 
             try:
+                # Sentiment score fetching, now for logging only
                 sentiment_score = await fetch_news_sentiment(symbol, analyzer)
                 logger.info(f"Sentiment score for {symbol}: {sentiment_score}")
             except Exception as e:
                 logger.error(f"Error fetching sentiment score: {e}")
-                sentiment_score = 0  # Default or neutral sentiment score
+                sentiment_score = 0  # Default or neutral sentiment score for logging only
 
             try:
                 X_latest, _ = prepare_data(data_1h)
@@ -523,48 +525,41 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                     try:
                         best_thresholds = sensitivity_analysis(data_1h, model)
                         if best_thresholds:
-                            rsi_thresholds, sentiment_thresholds = best_thresholds
+                            rsi_thresholds = best_thresholds
                         else:
                             rsi_thresholds = base_rsi_thresholds
-                            sentiment_thresholds = base_sentiment_thresholds
                     except Exception as e:
                         logger.error(f"Error during sensitivity analysis: {e}")
                         rsi_thresholds = base_rsi_thresholds
-                        sentiment_thresholds = base_sentiment_thresholds
 
-                    trade_signal = determine_trade_signal_enhanced(
+                    trade_signal = determine_trade_signal(
                         predicted_close, 
                         current_close, 
-                        sentiment_score, 
                         data_1h,
-                        rsi_thresholds=rsi_thresholds,
-                        sentiment_thresholds=sentiment_thresholds
+                        rsi_thresholds=rsi_thresholds
                     )
 
                     if trade_signal == 1:
                         message = (
                             f"📈 **Buy Signal for {symbol}**\n\n"
                             f"💹 **Predicted Price**: ${predicted_close:.2f}\n"
-                            f"💰 **Current Price**: ${current_close:.2f}\n"
-                            f"📊 **Sentiment**: {sentiment_score:.2f} (Positive)\n\n"
-                            f"💡 **Recommendation**: Price increase predicted. Sentiment positive. Consider buying.\n"
+                            f"💰 **Current Price**: ${current_close:.2f}\n\n"
+                            f"💡 **Recommendation**: Price increase predicted. Consider buying.\n"
                             f"🛒 **Potential Gain**: ${potential_profit:.2f} ({profit_or_loss_percentage:.2f}%)"
                         )
                     elif trade_signal == -1:
                         message = (
                             f"🚨 **Sell Signal for {symbol}**\n\n"
                             f"📉 **Predicted Price**: ${predicted_close:.2f}\n"
-                            f"💰 **Current Price**: ${current_close:.2f}\n"
-                            f"📊 **Sentiment**: {sentiment_score:.2f} (Negative)\n\n"
-                            f"💡 **Recommendation**: Price drop predicted. Sentiment negative. Consider selling.\n"
+                            f"💰 **Current Price**: ${current_close:.2f}\n\n"
+                            f"💡 **Recommendation**: Price drop predicted. Consider selling.\n"
                             f"📉 **Potential Loss Mitigation**: ${-potential_profit:.2f} ({profit_or_loss_percentage:.2f}%)"
                         )
                     else:
                         message = (
                             f"⚠️ **No Strong Signal for {symbol}**\n\n"
                             f"🔮 **Predicted Price**: ${predicted_close:.2f}\n"
-                            f"💰 **Current Price**: ${current_close:.2f}\n"
-                            f"📊 **Sentiment**: {sentiment_score:.2f} (Neutral)\n\n"
+                            f"💰 **Current Price**: ${current_close:.2f}\n\n"
                             f"🔍 **Analysis**: No significant change predicted. Hold off on any trading action for now."
                         )
 
