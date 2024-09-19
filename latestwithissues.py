@@ -452,29 +452,42 @@ def evaluate_strategy(trade_signals, actual_returns):
     }
 
 def sensitivity_analysis(data, model):
-    rsi_thresholds_range, _ = get_dynamic_threshold_ranges(data)
-    
-    best_score = -float('inf')
-    best_thresholds = None
+ 
+    try:
+        rsi_thresholds_range, _ = get_dynamic_threshold_ranges(data)
+        best_score = -float('inf')
+        best_thresholds = None
 
-    for rsi_thresholds in rsi_thresholds_range:
-        trade_signals = []
-        for row in data.itertuples():
-            signal = determine_trade_signal(
-                row.predicted_close,
-                row.current_close,
-                data,
-                rsi_thresholds=rsi_thresholds
-            )
-            trade_signals.append(signal)
+        for rsi_thresholds in rsi_thresholds_range:
+            trade_signals = []
+            for row in data.itertuples(index=False):
+                # Use index-based access to attributes in itertuples
+                predicted_close = getattr(row, 'predicted_close', None)
+                current_close = getattr(row, 'current_close', None)
 
-        # Evaluate performance with current thresholds
-        score = evaluate_strategy(trade_signals, data['actual_returns'])
-        if score > best_score:
-            best_score = score
-            best_thresholds = rsi_thresholds
+                if predicted_close is not None and current_close is not None:
+                    signal = determine_trade_signal(
+                        predicted_close,
+                        current_close,
+                        data,
+                        rsi_thresholds=rsi_thresholds
+                    )
+                    trade_signals.append(signal)
 
-    return best_thresholds
+            # Ensure actual_returns column exists in data
+            if 'actual_returns' in data.columns:
+                score = evaluate_strategy(trade_signals, data['actual_returns'])
+                if score > best_score:
+                    best_score = score
+                    best_thresholds = rsi_thresholds
+            else:
+                logger.error("actual_returns column is missing in the data.")
+
+        return best_thresholds
+
+    except Exception as e:
+        logger.error(f"Error during sensitivity analysis: {e}")
+        return None
 
 
 async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70)):
@@ -507,7 +520,7 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                 logger.info(f"Sentiment score for {symbol}: {sentiment_score}")
             except Exception as e:
                 logger.error(f"Error fetching sentiment score: {e}")
-                sentiment_score = 0  # Default or neutral sentiment score for logging only
+                sentiment_score = 0  # Default or neutral sentiment score
 
             try:
                 X_latest, _ = prepare_data(data_1h)
@@ -530,13 +543,17 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                         logger.error(f"Error during sensitivity analysis: {e}")
                         rsi_thresholds = base_rsi_thresholds
 
-                    # Ensure `determine_trade_signal_enhanced` is the correct function name and it accepts the correct parameters
-                    trade_signal = determine_trade_signal_enhanced(
+                    try:
+                        trade_signal = determine_trade_signal(
                         predicted_close, 
                         current_close, 
                         data_1h,
                         rsi_thresholds=rsi_thresholds
                     )
+                      # Handle trade signal as needed
+                    except Exception as e:
+                        logger.error(f"Error preparing data for prediction: {e}")
+                        trade_signal = 0
 
                     if trade_signal == 1:
                         message = (
@@ -589,9 +606,9 @@ HOURS_OF_DATA = 24 * 365  # Example: 24 hours/day * 365 days/year
 #hours_of_data = timedelta(hours=5)  
 
 # Define your value for HOURS_OF_DATA
-#VALID_SYMBOLS = set(['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT'])
+VALID_SYMBOLS = set(['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT'])
 
-VALID_SYMBOLS = set(['ETHUSDT' ])
+#VALID_SYMBOLS = set(['ETHUSDT' ])
 
 
 async def process_coin(symbol):
@@ -644,8 +661,8 @@ async def process_coin(symbol):
         logger.error("Error processing coin %s: %s", symbol, e)
 
 async def main():
-    #coins = ['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT']  # Example symbols
-    coins = ['ETHUSDT']
+    coins = ['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT']  # Example symbols
+    #coins = ['ETHUSDT']
     tasks = [process_coin(symbol) for symbol in coins]
     await asyncio.gather(*tasks)
 
