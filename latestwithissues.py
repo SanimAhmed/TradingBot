@@ -388,26 +388,38 @@ def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
     
     return rsi_thresholds, None
 
-def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70)):
-    """Generate trade signals based on price prediction and RSI, without sentiment score."""
+def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70), ma_window=20):
+    """Generate trade signals based on price prediction, RSI, and moving average, without sentiment score."""
     try:
+        # Fetch RSI and calculate volatility
         rsi = latest_data['rsi'].iloc[-1] if 'rsi' in latest_data.columns and not latest_data['rsi'].empty else None
         volatility = calculate_volatility(latest_data) if 'close' in latest_data.columns and not latest_data['close'].empty else 1.0
-
+        
+        # Adjust RSI thresholds based on volatility
         rsi_thresholds, _ = adjust_thresholds(volatility, base_rsi_thresholds)
-
         rsi_low, rsi_high = rsi_thresholds
 
-        if predicted_close > current_close and (rsi is not None and rsi < rsi_high):
-            return 1  # Buy
-        elif predicted_close < current_close and (rsi is not None and rsi > rsi_low):
-            return -1  # Sell
+        # Fetch moving average to provide additional buy/sell signals
+        if 'close' in latest_data.columns:
+            moving_average = latest_data['close'].rolling(window=ma_window).mean().iloc[-1]
         else:
-            return 0  # Hold
+            moving_average = current_close  # Use current price if MA is not available
+        
+        # Signal generation logic
+        signal_strength = predicted_close - current_close
+
+        # Relaxed logic for signal generation to increase the number of signals
+        if predicted_close > current_close and (rsi is not None and rsi < rsi_high):
+            if current_close > moving_average or signal_strength > 0.01 * volatility:
+                return 1  # Buy
+        elif predicted_close < current_close and (rsi is not None and rsi > rsi_low):
+            if current_close < moving_average or signal_strength < -0.01 * volatility:
+                return -1  # Sell
+        return 0  # Hold as default if no clear signal
+
     except Exception as e:
         logger.error("Error determining trade signal: %s", e)
-        return 0  # Hold as a default fallback
-
+        return 0  # Default to hold on errors
 
 def evaluate_strategy(trade_signals, actual_returns):
 
@@ -452,42 +464,50 @@ def evaluate_strategy(trade_signals, actual_returns):
     }
 
 def sensitivity_analysis(data, model):
- 
     try:
-        rsi_thresholds_range, _ = get_dynamic_threshold_ranges(data)
+        # Ensure that dynamic thresholds are properly fetched
+        rsi_thresholds_range, sentiment_thresholds_range = get_dynamic_threshold_ranges(data)
+        
         best_score = -float('inf')
-        best_thresholds = None
+        best_thresholds = (None, None)
 
+        # Iterate over all combinations of thresholds
         for rsi_thresholds in rsi_thresholds_range:
-            trade_signals = []
-            for row in data.itertuples(index=False):
-                # Use index-based access to attributes in itertuples
-                predicted_close = getattr(row, 'predicted_close', None)
-                current_close = getattr(row, 'current_close', None)
+            for sentiment_thresholds in sentiment_thresholds_range:
+                trade_signals = []
+                for row in data.itertuples(index=False):
+                    # Safeguard against missing attributes
+                    predicted_close = getattr(row, 'predicted_close', None)
+                    current_close = getattr(row, 'current_close', None)
+                    sentiment_score = getattr(row, 'sentiment_score', 0)
 
-                if predicted_close is not None and current_close is not None:
-                    signal = determine_trade_signal(
-                        predicted_close,
-                        current_close,
-                        data,
-                        rsi_thresholds=rsi_thresholds
-                    )
-                    trade_signals.append(signal)
+                    # Ensure all required values are present
+                    if predicted_close is not None and current_close is not None:
+                        signal = determine_trade_signal_enhanced(
+                            predicted_close,
+                            current_close,
+                            sentiment_score,
+                            data,
+                            rsi_thresholds=rsi_thresholds,
+                            sentiment_thresholds=sentiment_thresholds
+                        )
+                        trade_signals.append(signal)
 
-            # Ensure actual_returns column exists in data
-            if 'actual_returns' in data.columns:
-                score = evaluate_strategy(trade_signals, data['actual_returns'])
-                if score > best_score:
-                    best_score = score
-                    best_thresholds = rsi_thresholds
-            else:
-                logger.error("actual_returns column is missing in the data.")
+                # Ensure 'actual_returns' exists before evaluating strategy
+                if 'actual_returns' in data.columns:
+                    score = evaluate_strategy(trade_signals, data['actual_returns'])
+                    if score > best_score:
+                        best_score = score
+                        best_thresholds = (rsi_thresholds, sentiment_thresholds)
+                else:
+                    logger.error("actual_returns column is missing in the data.")
 
         return best_thresholds
 
     except Exception as e:
-        logger.error(f"Error during sensitivity analysis: {e}")
+        logger.error("Error during sensitivity analysis: %s", e)
         return None
+
 
 
 async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70)):
@@ -545,15 +565,16 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
 
                     try:
                         trade_signal = determine_trade_signal(
-                        predicted_close, 
-                        current_close, 
-                        data_1h,
-                        rsi_thresholds=rsi_thresholds
-                    )
-                      # Handle trade signal as needed
+                            predicted_close=predicted_close, 
+                            current_close=current_close, 
+                            latest_data=data_1h,
+                            base_rsi_thresholds=rsi_thresholds  # Changed from rsi_thresholds to match function signature
+                        )
+                    # Handle trade signal as needed
                     except Exception as e:
-                        logger.error(f"Error preparing data for prediction: {e}")
+                        logger.error(f"Error determining trade signal: {e}")
                         trade_signal = 0
+
 
                     if trade_signal == 1:
                         message = (
@@ -606,8 +627,28 @@ HOURS_OF_DATA = 24 * 365  # Example: 24 hours/day * 365 days/year
 #hours_of_data = timedelta(hours=5)  
 
 # Define your value for HOURS_OF_DATA
-VALID_SYMBOLS = set(['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT'])
-
+VALID_SYMBOLS = set([
+    'BTCUSDT',  # Bitcoin
+    'ETHUSDT',  # Ethereum
+    'BNBUSDT',  # Binance Coin
+    'SOLUSDT',  # Solana
+    'ADAUSDT',  # Cardano
+    'XRPUSDT',  # Ripple
+    'DOTUSDT',  # Polkadot
+    'LINKUSDT', # Chainlink
+    'DOGEUSDT', # Dogecoin
+    'LTCUSDT',  # Litecoin
+    'UNIUSDT',  # Uniswap
+    'AVAXUSDT', # Avalanche
+    'MATICUSDT',# Polygon
+    'SHIBUSDT', # Shiba Inu
+    'ATOMUSDT', # Cosmos
+    'BTTUSDT',  # BitTorrent
+    'FILUSDT',  # Filecoin
+    'ICPUSDT',  # Internet Computer
+    'SANDUSDT', # The Sandbox
+    'ALGOUSDT'  # Algorand
+])
 #VALID_SYMBOLS = set(['ETHUSDT' ])
 
 
@@ -661,7 +702,29 @@ async def process_coin(symbol):
         logger.error("Error processing coin %s: %s", symbol, e)
 
 async def main():
-    coins = ['NEARUSDT', 'TONUSDT', 'ETHUSDT', 'FETUSDT', 'CKBUSDT', 'XRPUSDT', 'SOLUSDT', 'WEETHUSDT', 'HBARUSDT', 'DOGSUSDT', 'AVAXUSDT', 'USDUSDT', 'WSTETHUSDT', 'USDEUSDT', 'IMXUSDT', 'XLMUSDT', 'TRXUSDT', 'AAVEUSDT', 'DOGEUSDT', 'WIFUSDT']  # Example symbols
+    
+    coins = [
+        'BTCUSDT',  # Bitcoin
+        'ETHUSDT',  # Ethereum
+        'BNBUSDT',  # Binance Coin
+        'SOLUSDT',  # Solana
+        'ADAUSDT',  # Cardano
+        'XRPUSDT',  # Ripple
+        'DOTUSDT',  # Polkadot
+        'LINKUSDT', # Chainlink
+        'DOGEUSDT', # Dogecoin
+        'LTCUSDT',  # Litecoin
+        'UNIUSDT',  # Uniswap
+        'AVAXUSDT', # Avalanche
+        'MATICUSDT',# Polygon
+        'SHIBUSDT', # Shiba Inu
+        'ATOMUSDT', # Cosmos
+        'BTTUSDT',  # BitTorrent
+        'FILUSDT',  # Filecoin
+        'ICPUSDT',  # Internet Computer
+        'SANDUSDT', # The Sandbox
+        'ALGOUSDT'  # Algorand
+    ]
     #coins = ['ETHUSDT']
     tasks = [process_coin(symbol) for symbol in coins]
     await asyncio.gather(*tasks)
