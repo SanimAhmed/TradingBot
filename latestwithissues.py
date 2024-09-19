@@ -477,7 +477,6 @@ def sensitivity_analysis(data, model):
     return best_thresholds
 
 
-
 async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70)):
     try:
         logger.info(f"Starting real-time trading for {symbol}")
@@ -504,7 +503,6 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                 return 0, "Error adding indicators."
 
             try:
-                # Sentiment score fetching, now for logging only
                 sentiment_score = await fetch_news_sentiment(symbol, analyzer)
                 logger.info(f"Sentiment score for {symbol}: {sentiment_score}")
             except Exception as e:
@@ -532,7 +530,8 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                         logger.error(f"Error during sensitivity analysis: {e}")
                         rsi_thresholds = base_rsi_thresholds
 
-                    trade_signal = determine_trade_signal(
+                    # Ensure `determine_trade_signal_enhanced` is the correct function name and it accepts the correct parameters
+                    trade_signal = determine_trade_signal_enhanced(
                         predicted_close, 
                         current_close, 
                         data_1h,
@@ -581,6 +580,7 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
     except Exception as e:
         logger.error(f"Error during real-time trading: {e}")
         return 0, f"Error: {e}"
+
 
 # Constants
 HOURS_OF_DATA = 24 * 365  # Example: 24 hours/day * 365 days/year
