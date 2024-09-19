@@ -32,34 +32,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-
-def get_recent_headlines(symbol):
-    """
-    Fetches recent news headlines for a given cryptocurrency symbol from CoinDesk RSS feed.
-    """
-    try:
-        rss_url = 'https://www.coindesk.com/feed/'
-        feed = feedparser.parse(rss_url)
-        headlines = [entry.title for entry in feed.entries if symbol.lower() in entry.title.lower()]
-        return headlines
-    except Exception as e:
-        print(f"Error fetching news headlines: {e}")
-        return []
-
-def fetch_news_sentiment(symbol, analyzer):
- 
-    headlines = get_recent_headlines(symbol)
-    if not headlines:
-        return 0
-    # Weigh more recent news more heavily
-    time_decay_factor = np.linspace(1.0, 0.1, len(headlines))
-    # Calculate sentiment score for each headline
-    scores = [analyzer.polarity_scores(headline)['compound'] for headline in headlines]
-    # Compute weighted average
-    sentiment = np.average(scores, weights=time_decay_factor)
-    
-    return sentiment
-
 # Initialize Binance client
 api_key = 'cLVgIkkwrnKDoOJtBzEUVo2fP7a09fVhFLDVl1A4j6LosXXPtdRZ68ckZ68BPrMU'
 api_secret = '0eCJTH1XqC3Wv55Tkg4QBCnD84DZ1cDfPZ3DtJ6MoME2OrJNLubfTJyD8vR4sCk2'
@@ -72,7 +44,6 @@ def preprocess_data(df):
     df = df[df['volume'] > 0]
     # Add more data cleaning steps as needed
     return df
-
 
 def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_retry_delay=2):
     def fetch_data_chunk(start_str, end_str):
@@ -103,10 +74,9 @@ def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_r
         current_start_time = start_time
         end_time = pd.to_datetime(end_time)
 
+        all_klines = []  # Move this outside the retry loop to accumulate data across retries
         while retries < max_retries:
             try:
-                all_klines = []
-
                 while True:
                     batch_end_time = min(current_start_time + relativedelta(months=1), end_time)
                     batch_end_str = batch_end_time.strftime('%d %b, %Y %H:%M:%S')
@@ -125,18 +95,32 @@ def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_r
                     logger.error("No data fetched after retries.")
                     return None
 
-                data = pd.DataFrame(all_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
-                                                         'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
-                                                         'taker_buy_quote_asset_volume', 'ignore'])
+                # Ensure all necessary columns are included
+                columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                           'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
+                           'taker_buy_quote_asset_volume', 'ignore']
+
+                data = pd.DataFrame(all_klines, columns=columns)
+
+                # Convert data types and timestamps
                 data = data.apply(pd.to_numeric, errors='coerce')
                 data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
                 data.set_index('timestamp', inplace=True)
+
+                # Ensure data preprocessing and indicator calculation
                 data = preprocess_data(data)  # Ensure clean data
+                if data is None or data.empty:
+                    logger.error("Preprocessed data is empty.")
+                    return None
+
                 data = add_indicators(data)   # Add indicators after cleaning data
-                X, y = prepare_data(data)     # Prepare data
-                
-                if data.empty:
-                    logger.error("Fetched data is empty.")
+                if data is None or data.empty:
+                    logger.error("Data after adding indicators is empty.")
+                    return None
+
+                X, y = prepare_data(data)     # Prepare data for model
+                if X is None or y is None:
+                    logger.error("Prepared data is empty.")
                     return None
 
                 logger.info(f"Data fetched successfully. Data shape: {data.shape}")
@@ -155,17 +139,14 @@ def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_r
     except Exception as e:
         logger.error(f"Error in fetch_historical_data: {e}")
         return None
-    
+
+
 # Function to add indicators
 def add_indicators(data):
     if data is None or data.empty:
         logger.error("Data is None or empty when adding indicators.")
         return None
     try:
-          # Assuming 'close' price is used to compute the 'target' (this can be adjusted as needed)
-        data['target'] = data['close'].shift(-1)  # Predicting the next close price
-        data.dropna(inplace=True)  # Drop any rows with NaN values caused by shifting
-
         required_columns = ['close', 'high', 'low', 'volume']
         for column in required_columns:
             if column not in data.columns:
@@ -210,7 +191,7 @@ def add_indicators(data):
         logger.info("Indicators added successfully.")
         return data
     except Exception as e:
-        print(f"Error in add_indicators: {e}")
+        logger.error(f"Error in add_indicators: {e}")
         return None
 
 def prepare_data(data):
@@ -544,7 +525,6 @@ async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_
                 return 0, "Error adding indicators."
 
             try:
-                sentiment_score = await fetch_news_sentiment(symbol, analyzer)
                 logger.info(f"Sentiment score for {symbol}: {sentiment_score}")
             except Exception as e:
                 logger.error(f"Error fetching sentiment score: {e}")
