@@ -162,6 +162,10 @@ def add_indicators(data):
         logger.error("Data is None or empty when adding indicators.")
         return None
     try:
+          # Assuming 'close' price is used to compute the 'target' (this can be adjusted as needed)
+        data['target'] = data['close'].shift(-1)  # Predicting the next close price
+        data.dropna(inplace=True)  # Drop any rows with NaN values caused by shifting
+
         required_columns = ['close', 'high', 'low', 'volume']
         for column in required_columns:
             if column not in data.columns:
@@ -206,82 +210,41 @@ def add_indicators(data):
         logger.info("Indicators added successfully.")
         return data
     except Exception as e:
-        logger.error(f"Error adding indicators: {e}")
-        return data
-    
+        print(f"Error in add_indicators: {e}")
+        return None
+
 def prepare_data(data):
     try:
-        data = data.copy()
-        logger.info("Initial Data Shape: %s", data.shape)
-        logger.info("Initial Data Head:\n%s", data.head())
-
-        # Ensure all required features are present
-        required_features = [
-            'SMA50', 'SMA200', 'RSI',
-            'Bollinger_High', 'Bollinger_Low', 'ATR', 'OBV',
-            'Stochastic_Oscillator', 'Bullish_Trend', 'EMA_12', 'EMA_26'
-        ]
-        missing_columns = [col for col in required_features if col not in data.columns]
-        if missing_columns:
-            raise ValueError(f"Missing columns: {', '.join(missing_columns)}")
-
-        # Compute 'actual_returns' if it's needed
-        if 'actual_returns' not in data.columns:
-            if 'close' not in data.columns:
-                raise ValueError("Column 'close' is missing in the data, unable to calculate 'actual_returns'.")
-            data['actual_returns'] = data['close'].pct_change().shift(-1)
+        # Logging the shape of the data before processing
+        if data is None or data.empty:
+            raise ValueError("Fetched data is None or empty.")
         
-        if 'actual_returns' not in data.columns:
-            logger.error("actual_returns column is still missing after computation.")
-            return None, None
+        # Dropping NaNs and logging shapes
+        data.dropna(inplace=True)
+        features = data.drop(columns=['target'])
+        target = data['target']
 
-        # Prepare features and target
-        X = data[required_features]
-        y = data['close'].shift(-1)
-        
-        logger.info("Features Shape Before Dropna: %s", X.shape)
-        logger.info("Target Shape Before Dropna: %s", y.shape)
+        print(f"Features Shape Before Dropna: {features.shape}")
+        print(f"Target Shape Before Dropna: {target.shape}")
 
-        # Align features and target
-        X = X.iloc[:-1].reset_index(drop=True)
-        y = y.dropna().reset_index(drop=True)
-        
-        # Make sure X and y have the same length after alignment
-        if len(X) != len(y):
-            logger.warning("Length mismatch between features and target after alignment. Adjusting...")
-            min_len = min(len(X), len(y))
-            X = X.head(min_len)
-            y = y.head(min_len)
-
-        # Apply StandardScaler to scale the data
+        # Scaling the features
         scaler = StandardScaler()
-        X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+        scaled_features = scaler.fit_transform(features)
 
-        logger.info("Features Shape After Scaling: %s", X_scaled.shape)
-        logger.info("Target Shape After Scaling: %s", y.shape)
+        # Logging the shape after scaling
+        print(f"Features Shape After Scaling: {scaled_features.shape}")
+        print(f"Target Shape After Scaling: {target.shape}")
 
-        # Check if there is enough data for prediction
-        if len(X_scaled) < 20:
-            logger.warning("Not enough data for prediction. Minimum required data points: 20")
-            return None, None
+        return scaled_features, target
 
-        # Check if scaled features or target data are empty
-        if X_scaled.empty or y.empty:
-            logger.warning("Features or target data is empty after preparation.")
-            return None, None
-
-        return X_scaled, y
-
-    except ValueError as e:
-        logger.error(f"ValueError in prepare_data: {e}")
-        return None, None
-    except KeyError as e:
-        logger.error(f"KeyError in prepare_data: {e}")
+    except ValueError as ve:
+        print(f"ValueError in prepare_data: {ve}")
         return None, None
     except Exception as e:
-        logger.error(f"Error preparing data: {e}")
+        print(f"General error in prepare_data: {e}")
         return None, None
-    
+
+
 def optimize_model(X, y):
     def objective(trial):
         try:
