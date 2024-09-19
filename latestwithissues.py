@@ -389,7 +389,7 @@ def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
     return rsi_thresholds, None
 
 def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70), ma_window=20):
-    """Generate trade signals based on price prediction, RSI, and moving average, without sentiment score."""
+    """Generate trade signals based on price prediction, RSI, and moving average, with balanced criteria."""
     try:
         # Fetch RSI and calculate volatility
         rsi = latest_data['rsi'].iloc[-1] if 'rsi' in latest_data.columns and not latest_data['rsi'].empty else None
@@ -405,17 +405,29 @@ def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi
         else:
             moving_average = current_close  # Use current price if MA is not available
         
-        # Signal generation logic
+        # Signal generation logic with balanced criteria
         signal_strength = predicted_close - current_close
+        
+        # Check for buy signal with relaxed criteria
+        if predicted_close > current_close:
+            if rsi is not None and rsi < rsi_high:
+                if current_close > moving_average or abs(signal_strength) > 0.01 * volatility:
+                    return 1  # Buy
 
-        # Relaxed logic for signal generation to increase the number of signals
-        if predicted_close > current_close and (rsi is not None and rsi < rsi_high):
-            if current_close > moving_average or signal_strength > 0.01 * volatility:
+        # Check for sell signal with relaxed criteria
+        elif predicted_close < current_close:
+            if rsi is not None and rsi > rsi_low:
+                if current_close < moving_average or abs(signal_strength) > 0.01 * volatility:
+                    return -1  # Sell
+
+        # Include a default signal if there's a significant difference
+        if abs(signal_strength) > 0.02 * volatility:
+            if predicted_close > current_close:
                 return 1  # Buy
-        elif predicted_close < current_close and (rsi is not None and rsi > rsi_low):
-            if current_close < moving_average or signal_strength < -0.01 * volatility:
+            elif predicted_close < current_close:
                 return -1  # Sell
-        return 0  # Hold as default if no clear signal
+
+        return 0  # Hold if no clear signal
 
     except Exception as e:
         logger.error("Error determining trade signal: %s", e)
@@ -483,7 +495,7 @@ def sensitivity_analysis(data, model):
 
                     # Ensure all required values are present
                     if predicted_close is not None and current_close is not None:
-                        signal = determine_trade_signal_enhanced(
+                        signal = determine_trade_signal(
                             predicted_close,
                             current_close,
                             sentiment_score,
