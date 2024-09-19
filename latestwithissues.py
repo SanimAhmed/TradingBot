@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 from xgboost import XGBRegressor
 import optuna
-from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import time
@@ -47,10 +47,7 @@ def get_recent_headlines(symbol):
         return []
 
 def fetch_news_sentiment(symbol, analyzer):
-    """
-    Fetches sentiment scores for the news headlines related to the given symbol.
-    Weighs recent news more heavily.
-    """
+ 
     headlines = get_recent_headlines(symbol)
     if not headlines:
         return 0
@@ -59,19 +56,27 @@ def fetch_news_sentiment(symbol, analyzer):
     # Calculate sentiment score for each headline
     scores = [analyzer.polarity_scores(headline)['compound'] for headline in headlines]
     # Compute weighted average
-    weighted_sentiment = np.average(scores, weights=time_decay_factor)
+    sentiment = np.average(scores, weights=time_decay_factor)
     
-    return weighted_sentiment
+    return sentiment
+
 # Initialize Binance client
 api_key = 'cLVgIkkwrnKDoOJtBzEUVo2fP7a09fVhFLDVl1A4j6LosXXPtdRZ68ckZ68BPrMU'
 api_secret = '0eCJTH1XqC3Wv55Tkg4QBCnD84DZ1cDfPZ3DtJ6MoME2OrJNLubfTJyD8vR4sCk2'
 client = Client(api_key, api_secret)
 
+def preprocess_data(df):
+    # Drop rows with missing values
+    df = df.dropna()
+    # Ensure 'volume' column is positive
+    df = df[df['volume'] > 0]
+    # Add more data cleaning steps as needed
+    return df
+
+
 def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_retry_delay=2):
-    def fetch_data_chunk(start_time, end_time):
+    def fetch_data_chunk(start_str, end_str):
         try:
-            start_str = pd.to_datetime(start_time, unit='ms').strftime('%d %b, %Y %H:%M:%S')
-            end_str = pd.to_datetime(end_time, unit='ms').strftime('%d %b, %Y %H:%M:%S')
             klines = client.get_historical_klines(symbol, interval, start_str=start_str, end_str=end_str)
             if not klines:
                 logger.warning(f"No data received for {symbol} from {start_str} to {end_str}.")
@@ -83,61 +88,79 @@ def fetch_historical_data(symbol, interval, start, end, max_retries=5, initial_r
     retries = 0
     retry_delay = initial_retry_delay
 
-    if "ago" in start:
-        start_time = datetime.now() - relativedelta(years=3)
-    else:
-        start_time = pd.to_datetime(start)
+    try:
+        # Handle start and end time
+        if "ago" in start:
+            start_time = datetime.now() - relativedelta(years=3)
+        else:
+            start_time = pd.to_datetime(start)
+        
+        if end == "now UTC":
+            end_time = datetime.now()
+        else:
+            end_time = pd.to_datetime(end)
+
+        current_start_time = start_time
+        end_time = pd.to_datetime(end_time)
+
+        while retries < max_retries:
+            try:
+                all_klines = []
+
+                while True:
+                    batch_end_time = min(current_start_time + relativedelta(months=1), end_time)
+                    batch_end_str = batch_end_time.strftime('%d %b, %Y %H:%M:%S')
+                    current_start_str = current_start_time.strftime('%d %b, %Y %H:%M:%S')
+
+                    klines_batch = fetch_data_chunk(current_start_str, batch_end_str)
+                    if not klines_batch:
+                        break
+
+                    all_klines.extend(klines_batch)
+                    if batch_end_time >= end_time:
+                        break
+                    current_start_time = batch_end_time + timedelta(milliseconds=1)  # Fixed increment
+
+                if not all_klines:
+                    logger.error("No data fetched after retries.")
+                    return None
+
+                data = pd.DataFrame(all_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                                                         'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
+                                                         'taker_buy_quote_asset_volume', 'ignore'])
+                data = data.apply(pd.to_numeric, errors='coerce')
+                data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+                data.set_index('timestamp', inplace=True)
+                data = preprocess_data(data)  # Ensure clean data
+                data = add_indicators(data)   # Add indicators after cleaning data
+                X, y = prepare_data(data)     # Prepare data
+                
+                if data.empty:
+                    logger.error("Fetched data is empty.")
+                    return None
+
+                logger.info(f"Data fetched successfully. Data shape: {data.shape}")
+                return data
+
+            except Exception as e:
+                logger.error(f"Error fetching historical data for {symbol}: {e}")
+                retries += 1
+                if retries < max_retries:
+                    delay = retry_delay * (2 ** retries)  # Exponential backoff
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    logger.error("Maximum retries reached. Returning None.")
+                    return None
+    except Exception as e:
+        logger.error(f"Error in fetch_historical_data: {e}")
+        return None
     
-    if end == "now UTC":
-        end_time = datetime.now()
-    else:
-        end_time = pd.to_datetime(end)
-    
-    start_time = start_time.timestamp() * 1000
-    end_time = end_time.timestamp() * 1000
-
-    while retries < max_retries:
-        try:
-            all_klines = []
-            current_start_time = start_time
-
-            while current_start_time < end_time:
-                batch_end_time = min(current_start_time + (1000 * 60 * 60 * 24 * 30), end_time)  # Up to a month at a time
-                klines_batch = fetch_data_chunk(current_start_time, batch_end_time)
-                all_klines.extend(klines_batch)
-                current_start_time = batch_end_time + 1  # Move to the next batch
-
-            if not all_klines:
-                logger.error("No data fetched after retries.")
-                return None
-
-            data = pd.DataFrame(all_klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
-                                                     'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
-                                                     'taker_buy_quote_asset_volume', 'ignore'])
-            data = data.apply(pd.to_numeric, errors='coerce')
-            data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
-            data.set_index('timestamp', inplace=True)
-            
-            if data.empty:
-                logger.error("Fetched data is empty.")
-                return None
-
-            logger.info(f"Data fetched successfully. Data shape: {data.shape}")
-            return data
-
-        except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
-            retries += 1
-            if retries < max_retries:
-                delay = retry_delay * (2 ** retries)  # Exponential backoff
-                logger.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                logger.error("Maximum retries reached. Returning None.")
-                return None
-
 # Function to add indicators
 def add_indicators(data):
+    if data is None or data.empty:
+        logger.error("Data is None or empty when adding indicators.")
+        return None
     try:
         required_columns = ['close', 'high', 'low', 'volume']
         for column in required_columns:
@@ -202,10 +225,20 @@ def prepare_data(data):
         if missing_columns:
             raise ValueError(f"Missing columns: {', '.join(missing_columns)}")
 
+        # Compute 'actual_returns' if it's needed
+        if 'actual_returns' not in data.columns:
+            if 'close' not in data.columns:
+                raise ValueError("Column 'close' is missing in the data, unable to calculate 'actual_returns'.")
+            data['actual_returns'] = data['close'].pct_change().shift(-1)
+        
+        if 'actual_returns' not in data.columns:
+            logger.error("actual_returns column is still missing after computation.")
+            return None, None
+
         # Prepare features and target
         X = data[required_features]
         y = data['close'].shift(-1)
-
+        
         logger.info("Features Shape Before Dropna: %s", X.shape)
         logger.info("Target Shape Before Dropna: %s", y.shape)
 
@@ -284,22 +317,32 @@ def optimize_model(X, y):
     joblib.dump(final_model, 'best_model.pkl')
     return final_model, best_params
 
+
 def evaluate_model(X_test, y_test):
     model = joblib.load('best_model.pkl')
 
-    y_pred = model.predict(X_test)
-    rmse = mean_squared_error(y_test, y_pred, squared=False)
-    mae = mean_absolute_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    logger.info(f"Model Evaluation Metrics:")
-    logger.info(f"RMSE: {rmse:.4f}")
-    logger.info(f"MAE: {mae:.4f}")
-    logger.info(f"R²: {r2:.4f}")
-    return rmse, mae, r2
+    try:
+        y_pred = model.predict(X_test)
+        rmse = mean_squared_error(y_test, y_pred, squared=False)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        mape = mean_absolute_percentage_error(y_test, y_pred)
+        logger.info("Model Evaluation Metrics:")
+        logger.info(f"RMSE: {rmse:.4f}")
+        logger.info(f"MAE: {mae:.4f}")
+        logger.info(f"R²: {r2:.4f}")
+        
+        return rmse, mae, r2
+    except Exception as e:
+        logger.error(f"Error during model evaluation: {e}")
+        return None, None, None
 
 def test_model(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    evaluate_model(X_test, y_test)
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        evaluate_model(X_test, y_test)
+    except Exception as e:
+        logger.error(f"Error during model testing: {e}")
 
 
 async def send_message(message):
@@ -348,7 +391,6 @@ def calculate_volatility(data):
     logger.info(f"Calculated Volatility: {volatility}")
     return volatility
 
-
 def get_dynamic_threshold_ranges(data):
     """Generate threshold ranges based on historical data analysis."""
     volatility = calculate_volatility(data)
@@ -356,8 +398,6 @@ def get_dynamic_threshold_ranges(data):
     # Example dynamic adjustment based on volatility
     rsi_low_base = 30
     rsi_high_base = 70
-    sentiment_positive_base = 0.1
-    sentiment_negative_base = -0.1
 
     volatility_factor = 1 + (volatility / 100)  # Example adjustment factor
 
@@ -365,12 +405,8 @@ def get_dynamic_threshold_ranges(data):
         (rsi_low_base * volatility_factor, rsi_high_base * volatility_factor)
         for volatility_factor in [0.9, 1.0, 1.1]
     ]
-    sentiment_thresholds_range = [
-        (sentiment_positive_base * volatility_factor, sentiment_negative_base * volatility_factor)
-        for volatility_factor in [0.9, 1.0, 1.1]
-    ]
 
-    return rsi_thresholds_range, sentiment_thresholds_range
+    return rsi_thresholds_range
 
 def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
     """Adjust RSI thresholds based on historical volatility."""
@@ -386,42 +422,43 @@ def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
         min(100, base_rsi_thresholds[1] * volatility_factor)  # Ensure thresholds do not exceed 100
     )
     
-    return rsi_thresholds, None
+    return rsi_thresholds
 
 def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70), ma_window=20):
-    """Generate trade signals based on price prediction, RSI, and moving average, with balanced criteria."""
+    """Generate trade signals based on price prediction, RSI, and moving average."""
     try:
         # Fetch RSI and calculate volatility
         rsi = latest_data['rsi'].iloc[-1] if 'rsi' in latest_data.columns and not latest_data['rsi'].empty else None
         volatility = calculate_volatility(latest_data) if 'close' in latest_data.columns and not latest_data['close'].empty else 1.0
         
         # Adjust RSI thresholds based on volatility
-        rsi_thresholds, _ = adjust_thresholds(volatility, base_rsi_thresholds)
-        rsi_low, rsi_high = rsi_thresholds
+        rsi_thresholds, _ = adjust_thresholds(volatility, base_rsi_thresholds) if volatility else (base_rsi_thresholds, None)
+        rsi_low, rsi_high = rsi_thresholds if rsi_thresholds else (30, 70)  # Default thresholds if adjustment fails
 
         # Fetch moving average to provide additional buy/sell signals
-        if 'close' in latest_data.columns:
+        if 'close' in latest_data.columns and not latest_data['close'].empty:
             moving_average = latest_data['close'].rolling(window=ma_window).mean().iloc[-1]
         else:
             moving_average = current_close  # Use current price if MA is not available
-        
-        # Signal generation logic with balanced criteria
+
+        # Signal generation logic with enhanced flexibility
         signal_strength = predicted_close - current_close
-        
-        # Check for buy signal with relaxed criteria
+        relative_difference = abs(signal_strength) / current_close
+
+        # Buy signal criteria
         if predicted_close > current_close:
-            if rsi is not None and rsi < rsi_high:
-                if current_close > moving_average or abs(signal_strength) > 0.01 * volatility:
+            if (rsi is not None and rsi < rsi_high) or relative_difference > 0.02:
+                if current_close > moving_average or signal_strength > 0.005 * volatility:
                     return 1  # Buy
 
-        # Check for sell signal with relaxed criteria
+        # Sell signal criteria
         elif predicted_close < current_close:
-            if rsi is not None and rsi > rsi_low:
-                if current_close < moving_average or abs(signal_strength) > 0.01 * volatility:
+            if (rsi is not None and rsi > rsi_low) or relative_difference > 0.02:
+                if current_close < moving_average or signal_strength < -0.005 * volatility:
                     return -1  # Sell
 
-        # Include a default signal if there's a significant difference
-        if abs(signal_strength) > 0.02 * volatility:
+        # Implement fallback signal based on significant relative difference
+        if relative_difference > 0.03:
             if predicted_close > current_close:
                 return 1  # Buy
             elif predicted_close < current_close:
@@ -434,7 +471,7 @@ def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi
         return 0  # Default to hold on errors
 
 def evaluate_strategy(trade_signals, actual_returns):
-
+    """Evaluate trading strategy performance metrics."""
     if len(trade_signals) != len(actual_returns):
         raise ValueError("Length of trade_signals and actual_returns must be the same.")
 
@@ -476,52 +513,48 @@ def evaluate_strategy(trade_signals, actual_returns):
     }
 
 def sensitivity_analysis(data, model):
+    """Perform sensitivity analysis to find the best thresholds for the trading strategy."""
     try:
         # Ensure that dynamic thresholds are properly fetched
-        rsi_thresholds_range, sentiment_thresholds_range = get_dynamic_threshold_ranges(data)
+        rsi_thresholds_range = get_dynamic_threshold_ranges(data)
         
         best_score = -float('inf')
         best_thresholds = (None, None)
 
-        # Iterate over all combinations of thresholds
+        # Iterate over all combinations of RSI thresholds
         for rsi_thresholds in rsi_thresholds_range:
-            for sentiment_thresholds in sentiment_thresholds_range:
-                trade_signals = []
-                for row in data.itertuples(index=False):
-                    # Safeguard against missing attributes
-                    predicted_close = getattr(row, 'predicted_close', None)
-                    current_close = getattr(row, 'current_close', None)
-                    sentiment_score = getattr(row, 'sentiment_score', 0)
+            trade_signals = []
+            for row in data.itertuples(index=False):
+                # Safeguard against missing attributes
+                predicted_close = getattr(row, 'predicted_close', None)
+                current_close = getattr(row, 'current_close', None)
 
-                    # Ensure all required values are present
-                    if predicted_close is not None and current_close is not None:
-                        signal = determine_trade_signal(
-                            predicted_close,
-                            current_close,
-                            sentiment_score,
-                            data,
-                            rsi_thresholds=rsi_thresholds,
-                            sentiment_thresholds=sentiment_thresholds
-                        )
-                        trade_signals.append(signal)
+                # Ensure all required values are present
+                if predicted_close is not None and current_close is not None:
+                    signal = determine_trade_signal(
+                        predicted_close,
+                        current_close,
+                        data,
+                        rsi_thresholds=rsi_thresholds
+                    )
+                    trade_signals.append(signal)
 
-                # Ensure 'actual_returns' exists before evaluating strategy
-                if 'actual_returns' in data.columns:
-                    score = evaluate_strategy(trade_signals, data['actual_returns'])
-                    if score > best_score:
-                        best_score = score
-                        best_thresholds = (rsi_thresholds, sentiment_thresholds)
-                else:
-                    logger.error("actual_returns column is missing in the data.")
+            # Ensure 'actual_returns' exists before evaluating strategy
+            if 'actual_returns' in data.columns:
+                score = evaluate_strategy(trade_signals, data['actual_returns'])
+                if score['annualized_return'] > best_score:
+                    best_score = score['annualized_return']
+                    best_thresholds = (rsi_thresholds, None)
+            else:
+                logger.error("actual_returns column is missing in the data.")
 
         return best_thresholds
+
 
     except Exception as e:
         logger.error("Error during sensitivity analysis: %s", e)
         return None
-
-
-
+    
 async def real_time_trading(symbol, model, X_train, y_train, analyzer, base_rsi_thresholds=(30, 70)):
     try:
         logger.info(f"Starting real-time trading for {symbol}")
@@ -639,29 +672,29 @@ HOURS_OF_DATA = 24 * 365  # Example: 24 hours/day * 365 days/year
 #hours_of_data = timedelta(hours=5)  
 
 # Define your value for HOURS_OF_DATA
-VALID_SYMBOLS = set([
-    'BTCUSDT',  # Bitcoin
-    'ETHUSDT',  # Ethereum
-    'BNBUSDT',  # Binance Coin
-    'SOLUSDT',  # Solana
-    'ADAUSDT',  # Cardano
-    'XRPUSDT',  # Ripple
-    'DOTUSDT',  # Polkadot
-    'LINKUSDT', # Chainlink
-    'DOGEUSDT', # Dogecoin
-    'LTCUSDT',  # Litecoin
-    'UNIUSDT',  # Uniswap
-    'AVAXUSDT', # Avalanche
-    'MATICUSDT',# Polygon
-    'SHIBUSDT', # Shiba Inu
-    'ATOMUSDT', # Cosmos
-    'BTTUSDT',  # BitTorrent
-    'FILUSDT',  # Filecoin
-    'ICPUSDT',  # Internet Computer
-    'SANDUSDT', # The Sandbox
-    'ALGOUSDT'  # Algorand
-])
-#VALID_SYMBOLS = set(['ETHUSDT' ])
+# VALID_SYMBOLS = set([
+#     'BTCUSDT',  # Bitcoin
+#     'ETHUSDT',  # Ethereum
+#     'BNBUSDT',  # Binance Coin
+#     'SOLUSDT',  # Solana
+#     'ADAUSDT',  # Cardano
+#     'XRPUSDT',  # Ripple
+#     'DOTUSDT',  # Polkadot
+#     'LINKUSDT', # Chainlink
+#     'DOGEUSDT', # Dogecoin
+#     'LTCUSDT',  # Litecoin
+#     'UNIUSDT',  # Uniswap
+#     'AVAXUSDT', # Avalanche
+#     'MATICUSDT',# Polygon
+#     'SHIBUSDT', # Shiba Inu
+#     'ATOMUSDT', # Cosmos
+#     'BTTUSDT',  # BitTorrent
+#     'FILUSDT',  # Filecoin
+#     'ICPUSDT',  # Internet Computer
+#     'SANDUSDT', # The Sandbox
+#     'ALGOUSDT'  # Algorand
+# ])
+VALID_SYMBOLS = set(['ETHUSDT' ])
 
 
 async def process_coin(symbol):
@@ -715,29 +748,29 @@ async def process_coin(symbol):
 
 async def main():
     
-    coins = [
-        'BTCUSDT',  # Bitcoin
-        'ETHUSDT',  # Ethereum
-        'BNBUSDT',  # Binance Coin
-        'SOLUSDT',  # Solana
-        'ADAUSDT',  # Cardano
-        'XRPUSDT',  # Ripple
-        'DOTUSDT',  # Polkadot
-        'LINKUSDT', # Chainlink
-        'DOGEUSDT', # Dogecoin
-        'LTCUSDT',  # Litecoin
-        'UNIUSDT',  # Uniswap
-        'AVAXUSDT', # Avalanche
-        'MATICUSDT',# Polygon
-        'SHIBUSDT', # Shiba Inu
-        'ATOMUSDT', # Cosmos
-        'BTTUSDT',  # BitTorrent
-        'FILUSDT',  # Filecoin
-        'ICPUSDT',  # Internet Computer
-        'SANDUSDT', # The Sandbox
-        'ALGOUSDT'  # Algorand
-    ]
-    #coins = ['ETHUSDT']
+    # coins = [
+    #     'BTCUSDT',  # Bitcoin
+    #     'ETHUSDT',  # Ethereum
+    #     'BNBUSDT',  # Binance Coin
+    #     'SOLUSDT',  # Solana
+    #     'ADAUSDT',  # Cardano
+    #     'XRPUSDT',  # Ripple
+    #     'DOTUSDT',  # Polkadot
+    #     'LINKUSDT', # Chainlink
+    #     'DOGEUSDT', # Dogecoin
+    #     'LTCUSDT',  # Litecoin
+    #     'UNIUSDT',  # Uniswap
+    #     'AVAXUSDT', # Avalanche
+    #     'MATICUSDT',# Polygon
+    #     'SHIBUSDT', # Shiba Inu
+    #     'ATOMUSDT', # Cosmos
+    #     'BTTUSDT',  # BitTorrent
+    #     'FILUSDT',  # Filecoin
+    #     'ICPUSDT',  # Internet Computer
+    #     'SANDUSDT', # The Sandbox
+    #     'ALGOUSDT'  # Algorand
+    # ]
+    coins = ['ETHUSDT']
     tasks = [process_coin(symbol) for symbol in coins]
     await asyncio.gather(*tasks)
 
