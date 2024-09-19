@@ -345,7 +345,9 @@ def calculate_volatility(data):
     """Calculate historical volatility from price data."""
     returns = data['close'].pct_change().dropna()
     volatility = returns.std() * (252 ** 0.5)  # Annualize volatility
+    logger.info(f"Calculated Volatility: {volatility}")
     return volatility
+
 
 def get_dynamic_threshold_ranges(data):
     """Generate threshold ranges based on historical data analysis."""
@@ -370,41 +372,36 @@ def get_dynamic_threshold_ranges(data):
 
     return rsi_thresholds_range, sentiment_thresholds_range
 
-def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1)):
-    """Adjust thresholds based on historical volatility."""
+def adjust_thresholds(volatility, base_rsi_thresholds=(30, 70)):
+    """Adjust RSI thresholds based on historical volatility."""
     if volatility < 0:
         raise ValueError("Volatility must be a non-negative value.")
     
-    # Example adjustment factor, you might want to cap or normalize this value
+    # Example adjustment factor
     volatility_factor = max(0.5, min(2.0, 1 + (volatility / 100)))  # Adjust factor between 0.5 and 2.0
     
-    # Adjust thresholds
+    # Adjust RSI thresholds
     rsi_thresholds = (
         max(0, base_rsi_thresholds[0] * volatility_factor),  # Ensure thresholds are non-negative
         min(100, base_rsi_thresholds[1] * volatility_factor)  # Ensure thresholds do not exceed 100
     )
-    sentiment_thresholds = (
-        base_sentiment_thresholds[0] * volatility_factor,
-        base_sentiment_thresholds[1] * volatility_factor
-    )
     
-    return rsi_thresholds, sentiment_thresholds
+    return rsi_thresholds, None
 
-def determine_trade_signal_enhanced(predicted_close, current_close, sentiment_score, latest_data, base_rsi_thresholds=(30, 70), base_sentiment_thresholds=(0.1, -0.1), rsi_thresholds=None, sentiment_thresholds=None):
-    """Enhanced trade signal decision combining price prediction, sentiment, and RSI with adjustable thresholds."""
+
+def determine_trade_signal(predicted_close, current_close, latest_data, base_rsi_thresholds=(30, 70)):
+    """Generate trade signals based on price prediction and RSI, without sentiment score."""
     try:
         rsi = latest_data['rsi'].iloc[-1] if 'rsi' in latest_data.columns and not latest_data['rsi'].empty else None
         volatility = calculate_volatility(latest_data) if 'close' in latest_data.columns and not latest_data['close'].empty else 1.0
 
-        if rsi_thresholds is None or sentiment_thresholds is None:
-            rsi_thresholds, sentiment_thresholds = adjust_thresholds(volatility, base_rsi_thresholds, base_sentiment_thresholds)
+        rsi_thresholds, _ = adjust_thresholds(volatility, base_rsi_thresholds)
 
         rsi_low, rsi_high = rsi_thresholds
-        sentiment_positive, sentiment_negative = sentiment_thresholds
 
-        if predicted_close > current_close and sentiment_score > sentiment_positive and (rsi is not None and rsi < rsi_high):
+        if predicted_close > current_close and (rsi is not None and rsi < rsi_high):
             return 1  # Buy
-        elif predicted_close < current_close and sentiment_score < sentiment_negative and (rsi is not None and rsi > rsi_low):
+        elif predicted_close < current_close and (rsi is not None and rsi > rsi_low):
             return -1  # Sell
         else:
             return 0  # Hold
@@ -455,30 +452,27 @@ def evaluate_strategy(trade_signals, actual_returns):
     }
 
 def sensitivity_analysis(data, model):
-    rsi_thresholds_range, sentiment_thresholds_range = get_dynamic_threshold_ranges(data)
+    rsi_thresholds_range, _ = get_dynamic_threshold_ranges(data)
     
     best_score = -float('inf')
     best_thresholds = None
 
     for rsi_thresholds in rsi_thresholds_range:
-        for sentiment_thresholds in sentiment_thresholds_range:
-            trade_signals = []
-            for idx, row in data.iterrows():
-                signal = determine_trade_signal_enhanced(
-                    row['predicted_close'],
-                    row['current_close'],
-                    row['sentiment_score'],
-                    data,
-                    rsi_thresholds=rsi_thresholds,
-                    sentiment_thresholds=sentiment_thresholds
-                )
-                trade_signals.append(signal)
+        trade_signals = []
+        for row in data.itertuples():
+            signal = determine_trade_signal(
+                row.predicted_close,
+                row.current_close,
+                data,
+                rsi_thresholds=rsi_thresholds
+            )
+            trade_signals.append(signal)
 
-            # Evaluate performance with current thresholds
-            score = evaluate_strategy(trade_signals, data['actual_returns'])
-            if score['annualized_return'] > best_score:
-                best_score = score['annualized_return']
-                best_thresholds = (rsi_thresholds, sentiment_thresholds)
+        # Evaluate performance with current thresholds
+        score = evaluate_strategy(trade_signals, data['actual_returns'])
+        if score > best_score:
+            best_score = score
+            best_thresholds = rsi_thresholds
 
     return best_thresholds
 
